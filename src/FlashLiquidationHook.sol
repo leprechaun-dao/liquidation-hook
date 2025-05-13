@@ -12,8 +12,7 @@ import {BeforeSwapDelta} from "@uniswap/v4-core/src/types/BeforeSwapDelta.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import {ILiquidationProtocol} from "./interfaces/ILiquidationProtocol.sol";
-// Import our local version of SwapParams
-import {SwapParams} from "./types/PoolOperation.sol";
+import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 /**
  * @title FlashLiquidationHook

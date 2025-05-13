@@ -19,8 +19,8 @@ contract DeployScript is Script {
         MockERC20 mockWETH = new MockERC20("Wrapped Ether", "WETH", 18);
         MockERC20 mockUSDC = new MockERC20("USD Coin", "USDC", 6);
         
-        console.log("MockWETH deployed at:", address(mockWETH));
-        console.log("MockUSDC deployed at:", address(mockUSDC));
+        // console.log("MockWETH deployed at:", address(mockWETH));
+        // console.log("MockUSDC deployed at:", address(mockUSDC));
         
         // Mint some tokens for testing
         mockWETH.mint(msg.sender, 100 ether);
@@ -28,14 +28,14 @@ contract DeployScript is Script {
         
         // Deploy the mock liquidation protocol for testing
         MockLiquidationProtocol mockProtocol = new MockLiquidationProtocol();
-        console.log("MockLiquidationProtocol deployed at:", address(mockProtocol));
+        // console.log("MockLiquidationProtocol deployed at:", address(mockProtocol));
         
         // Deploy the flash liquidation hook
         FlashLiquidationHook hook = new FlashLiquidationHook(
             IPoolManager(poolManagerAddress),
             mockProtocol
         );
-        console.log("FlashLiquidationHook deployed at:", address(hook));
+        // console.log("FlashLiquidationHook deployed at:", address(hook));
         
         // Deploy the liquidation orchestrator
         LiquidationOrchestrator orchestrator = new LiquidationOrchestrator(
@@ -43,7 +43,7 @@ contract DeployScript is Script {
             1e18, // Minimum profit of 1 ETH
             msg.sender
         );
-        console.log("LiquidationOrchestrator deployed at:", address(orchestrator));
+        // console.log("LiquidationOrchestrator deployed at:", address(orchestrator));
         
         // Set up a test position
         mockWETH.mint(address(mockProtocol), 10 ether);
@@ -59,9 +59,9 @@ contract DeployScript is Script {
             true // Mark as underwater
         );
         
-        console.log("Test position created for borrower:", address(0x1234));
-        console.log("USDC debt:", 5_000 * 1e6);
-        console.log("WETH collateral:", 2 ether);
+        // console.log("Test position created for borrower:", address(0x1234));
+        // console.log("USDC debt:", 5_000 * 1e6);
+        // console.log("WETH collateral:", 2 ether);
         
         vm.stopBroadcast();
     }
