@@ -1,0 +1,72 @@
+# Compiler files
+cache/
+out/
+artifacts/
+coverage/
+
+# Dependency directories
+node_modules/
+.deps/
+
+# Development env files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Solidity Coverage
+coverage/
+coverage.json
+
+# Hardhat files
+artifacts/
+cache/
+typechain/
+typechain-types/
+
+# Foundry files
+cache/
+out/
+optimized-out/
+forge-cache/
+lcov.info
+.gas-snapshot
+
+# Brownie specific files
+build/
+reports/
+
+# Truffle specific files
+.truffle-solidity-loader/
+
+# DappTools specific files
+.dapp/
+
+# Anvil specific
+anvil/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+**/.DS_Store
+.directory
+.Trash-*
+$RECYCLE.BIN/
+*.lnk
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
