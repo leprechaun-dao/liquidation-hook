@@ -176,7 +176,7 @@ forge install
 
 2. Build the project:
    ```bash
-   forge build
+   forge build --via-ir
    ```
 
 3. Edit the deployment script (`script/Deploy.s.sol`) with appropriate addresses.
@@ -230,7 +230,7 @@ For simple use cases, direct interaction with the hook is sufficient. For produc
 ### Build
 
 ```shell
-$ forge build
+$ forge build --via-ir
 ```
 
 ### Deploy
