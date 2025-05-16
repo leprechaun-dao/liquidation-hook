@@ -5,10 +5,10 @@ import {ILiquidationProtocol} from "../interfaces/ILiquidationProtocol.sol";
 import {IERC20} from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 
 /**
- * @title MockLiquidationProtocol
- * @notice A mock implementation of the ILiquidationProtocol for testing and demonstration
+ * @title SimpleMockLiquidationProtocol
+ * @notice A simple mock implementation of the ILiquidationProtocol for testing and demonstration
  */
-contract MockLiquidationProtocol is ILiquidationProtocol {
+contract SimpleMockLiquidationProtocol is ILiquidationProtocol {
     // Liquidation bonus (1.1 = 10% bonus)
     uint256 public liquidationBonus = 1.1e18;
     
@@ -159,6 +159,46 @@ contract MockLiquidationProtocol is ILiquidationProtocol {
         
         // Transfer the debt tokens from the liquidator to this contract
         IERC20(debtToken).transferFrom(msg.sender, address(this), debtAmount);
+        
+        return collateralToSeize;
+    }
+    
+    /**
+     * @notice Simulates a liquidation to estimate collateral received
+     * @param borrower Address of the borrower
+     * @param debtToken Token that was borrowed
+     * @param collateralToken Token used as collateral
+     * @param debtAmount Amount of debt to liquidate
+     * @return Amount of collateral that would be seized in an actual liquidation
+     */
+    function simulateLiquidation(
+        address borrower,
+        address debtToken,
+        address collateralToken,
+        uint256 debtAmount
+    ) external view override returns (uint256) {
+        (bool liquidatable, uint256 maxDebtAmount) = this.isLiquidatable(
+            borrower, 
+            debtToken, 
+            collateralToken
+        );
+        
+        if (!liquidatable) {
+            return 0;
+        }
+        
+        // Cap debtAmount to maxDebtAmount
+        if (debtAmount > maxDebtAmount) {
+            debtAmount = maxDebtAmount;
+        }
+        
+        // Calculate collateral to seize (with bonus)
+        uint256 collateralToSeize = (debtAmount * liquidationBonus) / 1e18;
+        
+        // Cap to available collateral
+        if (collateralToSeize > userCollateral[borrower][collateralToken]) {
+            collateralToSeize = userCollateral[borrower][collateralToken];
+        }
         
         return collateralToSeize;
     }

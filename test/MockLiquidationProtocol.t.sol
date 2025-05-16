@@ -8,7 +8,7 @@ import {MockLiquidationProtocol} from "../src/mock/MockLiquidationProtocol.sol";
 import {MockERC20} from "../src/mock/MockERC20.sol";
 
 /**
- * @title ImprovedLiquidationProtocolTest
+ * @title LiquidationProtocolTest
  * @notice Test for the improved mock liquidation protocol
  */
 contract LiquidationProtocolTest is Test {
@@ -219,7 +219,7 @@ contract LiquidationProtocolTest is Test {
         );
         
         // Position is not liquidatable yet
-        (uint256 collateralToSeize, uint256 profitUsd) = protocol.simulateLiquidation(
+        uint256 collateralToSeize = protocol.simulateLiquidation(
             alice,
             address(lepToken),
             address(weth),
@@ -227,13 +227,12 @@ contract LiquidationProtocolTest is Test {
         );
         
         assertEq(collateralToSeize, 0, "No collateral to seize when position is not liquidatable");
-        assertEq(profitUsd, 0, "No profit when position is not liquidatable");
         
         // Make the position underwater
         oracle.setTokenPrice(address(weth), 900e18, 18);
         
         // Simulate liquidation
-        (collateralToSeize, profitUsd) = protocol.simulateLiquidation(
+        collateralToSeize = protocol.simulateLiquidation(
             alice,
             address(lepToken),
             address(weth),
@@ -245,6 +244,17 @@ contract LiquidationProtocolTest is Test {
         // At $900 per WETH, that's 1.222... WETH
         assertGt(collateralToSeize, 1.22 ether, "Collateral to seize should include bonus");
         assertLt(collateralToSeize, 1.23 ether, "Collateral to seize calculation should be precise");
+        
+        // Get the simulation details with profit estimate
+        (uint256 collateralAmount, uint256 profitUsd) = protocol.getSimulationDetails(
+            alice,
+            address(lepToken),
+            address(weth),
+            100 ether
+        );
+        
+        // Verify the collateral amount matches
+        assertEq(collateralAmount, collateralToSeize, "Collateral amounts should match");
         
         // Expected profit in USD:
         // $1100 (collateral value with bonus) - $1000 (debt value) = $100

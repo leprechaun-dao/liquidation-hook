@@ -399,14 +399,13 @@ contract MockLiquidationProtocol is ILiquidationProtocol {
      * @param collateralToken Token used as collateral
      * @param debtAmount Amount of debt to liquidate
      * @return collateralToSeize Amount of collateral that would be seized
-     * @return profitUsd Estimated profit in USD terms
      */
     function simulateLiquidation(
         address borrower,
         address debtToken,
         address collateralToken,
         uint256 debtAmount
-    ) external view returns (uint256 collateralToSeize, uint256 profitUsd) {
+    ) external view override returns (uint256) {
         // Find the liquidatable position
         for (uint256 i = 0; i < userPositionCount[borrower]; i++) {
             Position storage position = userPositions[borrower][i];
@@ -432,7 +431,7 @@ contract MockLiquidationProtocol is ILiquidationProtocol {
                     // Calculate collateral to seize with discount
                     uint256 debtUsdValue = oracle.getUsdValue(debtToken, debtAmount);
                     uint256 discountedDebtValue = (debtUsdValue * (10000 + auctionDiscount)) / 10000;
-                    collateralToSeize = oracle.getTokenAmount(
+                    uint256 collateralToSeize = oracle.getTokenAmount(
                         collateralToken, 
                         discountedDebtValue
                     );
@@ -442,16 +441,39 @@ contract MockLiquidationProtocol is ILiquidationProtocol {
                         collateralToSeize = position.collateralAmount;
                     }
                     
-                    // Calculate profit in USD terms
-                    uint256 collateralUsdValue = oracle.getUsdValue(collateralToken, collateralToSeize);
-                    profitUsd = collateralUsdValue > debtUsdValue ? collateralUsdValue - debtUsdValue : 0;
-                    
-                    return (collateralToSeize, profitUsd);
+                    return collateralToSeize;
                 }
             }
         }
         
-        return (0, 0);
+        return 0;
+    }
+    
+    /**
+     * @notice Helper function to get profit estimate in USD terms
+     * @dev This is a helper for external contracts, not part of the interface
+     * @param borrower Address of the borrower
+     * @param debtToken Token that was borrowed
+     * @param collateralToken Token used as collateral
+     * @param debtAmount Amount of debt to liquidate
+     * @return collateralToSeize Amount of collateral that would be seized
+     * @return profitUsd Estimated profit in USD terms
+     */
+    function getSimulationDetails(
+        address borrower,
+        address debtToken,
+        address collateralToken,
+        uint256 debtAmount
+    ) external view returns (uint256 collateralToSeize, uint256 profitUsd) {
+        collateralToSeize = this.simulateLiquidation(borrower, debtToken, collateralToken, debtAmount);
+        
+        if (collateralToSeize > 0) {
+            uint256 debtUsdValue = oracle.getUsdValue(debtToken, debtAmount);
+            uint256 collateralUsdValue = oracle.getUsdValue(collateralToken, collateralToSeize);
+            profitUsd = collateralUsdValue > debtUsdValue ? collateralUsdValue - debtUsdValue : 0;
+        }
+        
+        return (collateralToSeize, profitUsd);
     }
     
     /**
