@@ -1,68 +1,114 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Script, console} from "forge-std/Script.sol";
-import {FlashLiquidationHook} from "../src/FlashLiquidationHook.sol";
+import {Script} from "forge-std/Script.sol";
+import {console} from "forge-std/console.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {MockOracle} from "../src/mock/oracle/MockOracle.sol";
 import {MockLiquidationProtocol} from "../src/mock/MockLiquidationProtocol.sol";
-import {MockERC20} from "../src/mock/MockERC20.sol";
+import {FlashLiquidationHook} from "../src/FlashLiquidationHook.sol";
 import {LiquidationOrchestrator} from "../src/LiquidationOrchestrator.sol";
-import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
+import {MockERC20} from "../src/mock/MockERC20.sol";
 
-contract DeployScript is Script {
-    function run() public {
-        vm.startBroadcast();
-        
-        // Replace with actual PoolManager address for the network you're deploying to
-        address poolManagerAddress = 0x0000000000000000000000000000000000000000; // Placeholder
+/**
+ * @title DeployImprovedScript
+ * @notice Script to deploy the improved liquidation hook and related contracts
+ */
+contract DeployImprovedScript is Script {
+    function run() external {
+        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
+        vm.startBroadcast(deployerPrivateKey);
         
         // Deploy mock tokens for testing
-        MockERC20 mockWETH = new MockERC20("Wrapped Ether", "WETH", 18);
-        MockERC20 mockUSDC = new MockERC20("USD Coin", "USDC", 6);
+        MockERC20 weth = new MockERC20("Wrapped Ether", "WETH", 18);
+        MockERC20 usdc = new MockERC20("USD Coin", "USDC", 6);
+        MockERC20 lepToken = new MockERC20("Leprechaun Synthetic", "LEP", 18);
         
-        // console.log("MockWETH deployed at:", address(mockWETH));
-        // console.log("MockUSDC deployed at:", address(mockUSDC));
+        // Set up initial supplies
+        weth.mint(msg.sender, 1000 ether);
+        usdc.mint(msg.sender, 1000000 * 10**6);
+        lepToken.mint(msg.sender, 1000 ether);
         
-        // Mint some tokens for testing
-        mockWETH.mint(msg.sender, 100 ether);
-        mockUSDC.mint(msg.sender, 100_000 * 1e6);
+        // Deploy MockOracle
+        MockOracle oracle = new MockOracle();
         
-        // Deploy the mock liquidation protocol for testing
-        MockLiquidationProtocol mockProtocol = new MockLiquidationProtocol();
-        // console.log("MockLiquidationProtocol deployed at:", address(mockProtocol));
+        // Set token prices in the oracle
+        oracle.setTokenPrice(address(weth), 2000e18, 18); // WETH = $2000
+        oracle.setTokenPrice(address(usdc), 1e18, 6);     // USDC = $1
+        oracle.setTokenPrice(address(lepToken), 10e18, 18); // LEP = $10
         
-        // Deploy the flash liquidation hook
-        FlashLiquidationHook hook = new FlashLiquidationHook(
-            IPoolManager(poolManagerAddress),
-            mockProtocol
+        // Deploy MockLiquidationProtocol
+        address feeCollector = msg.sender;
+        MockLiquidationProtocol liquidationProtocol = new MockLiquidationProtocol(
+            address(oracle),
+            feeCollector
         );
-        // console.log("FlashLiquidationHook deployed at:", address(hook));
         
-        // Deploy the liquidation orchestrator
-        LiquidationOrchestrator orchestrator = new LiquidationOrchestrator(
-            hook,
-            1e18, // Minimum profit of 1 ETH
+        // Configure liquidation protocol
+        liquidationProtocol.setDefaultMinCollateralRatio(15000); // 150%
+        liquidationProtocol.setAssetAuctionDiscount(address(lepToken), 1000); // 10% discount
+        liquidationProtocol.setAssetMinCollateralRatio(address(lepToken), 15000); // 150%
+        liquidationProtocol.setCollateralRiskMultiplier(address(weth), 10000); // 1.0
+        liquidationProtocol.setCollateralRiskMultiplier(address(usdc), 9000); // 0.9 (slightly higher risk for stablecoins)
+        
+        // Allow the liquidation protocol to mint/burn tokens
+        // In a real implementation, this would be handled by the protocol's own logic
+        weth.mint(address(liquidationProtocol), 10000 ether);
+        usdc.mint(address(liquidationProtocol), 20000000 * 10**6);
+        lepToken.mint(address(liquidationProtocol), 10000 ether);
+        
+        // Get the Uniswap V4 Pool Manager address
+        // This would be a real address on a live network
+        address poolManagerAddress = vm.envAddress("POOL_MANAGER_ADDRESS");
+        IPoolManager poolManager = IPoolManager(poolManagerAddress);
+        
+        // Deploy FlashLiquidationHook
+        FlashLiquidationHook flashLiquidationHook = new FlashLiquidationHook(
+            poolManager,
+            liquidationProtocol
+        );
+        
+        // Deploy LiquidationOrchestrator
+        uint256 minProfitAmount = 100 * 10**6; // 100 USDC minimum profit
+        LiquidationOrchestrator liquidationOrchestrator = new LiquidationOrchestrator(
+            flashLiquidationHook,
+            minProfitAmount,
             msg.sender
         );
-        // console.log("LiquidationOrchestrator deployed at:", address(orchestrator));
         
-        // Set up a test position
-        mockWETH.mint(address(mockProtocol), 10 ether);
-        mockUSDC.mint(address(mockProtocol), 20_000 * 1e6);
+        // Add token pairs to monitor
+        liquidationOrchestrator.addTokenPair(address(usdc), address(weth), 3000); // 0.3% fee tier
+        liquidationOrchestrator.addTokenPair(address(lepToken), address(weth), 3000); // 0.3% fee tier
+        liquidationOrchestrator.addTokenPair(address(lepToken), address(usdc), 500); // 0.05% fee tier
         
-        // Create an underwater position
-        mockProtocol.setupBorrowerPosition(
-            address(0x1234), // Test borrower
-            address(mockUSDC),
-            address(mockWETH),
-            5_000 * 1e6, // 5,000 USDC debt
-            2 ether, // 2 WETH collateral
-            true // Mark as underwater
+        // Set up a test underwater position
+        address testUser = vm.addr(1); // Test user address
+        
+        // Create a position for the test user
+        liquidationProtocol.addTestPosition(
+            testUser,
+            address(lepToken), // Synthetic asset (debt)
+            address(weth),     // Collateral
+            1 ether,           // 1 WETH as collateral
+            100 ether          // 100 LEP as debt
         );
         
-        // console.log("Test position created for borrower:", address(0x1234));
-        // console.log("USDC debt:", 5_000 * 1e6);
-        // console.log("WETH collateral:", 2 ether);
+        // Set position as underwater (collateral value dropped)
+        // 1 WETH = $2000, 100 LEP = $1000, so collateralization ratio = 200%
+        // But if WETH price drops to $1000, ratio would be 100% (underwater)
+        // We simulate this by setting the position as underwater
+        oracle.setTokenPrice(address(weth), 1000e18, 18); // WETH price drop to $1000
         
         vm.stopBroadcast();
+        
+        console.log("Deployment completed:");
+        console.log("WETH address:", address(weth));
+        console.log("USDC address:", address(usdc));
+        console.log("LEP token address:", address(lepToken));
+        console.log("Oracle address:", address(oracle));
+        console.log("Liquidation Protocol address:", address(liquidationProtocol));
+        console.log("Flash Liquidation Hook address:", address(flashLiquidationHook));
+        console.log("Liquidation Orchestrator address:", address(liquidationOrchestrator));
+        console.log("Test user with underwater position:", testUser);
     }
 }

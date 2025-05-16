@@ -34,4 +34,19 @@ interface ILiquidationProtocol {
         address debtToken,
         address collateralToken
     ) external view returns (bool liquidatable, uint256 maxDebtAmount);
+
+    /**
+     * @notice Simulates a liquidation to estimate collateral that would be received
+     * @param borrower Address of the borrower
+     * @param debtToken Token that was borrowed
+     * @param collateralToken Token used as collateral
+     * @param debtAmount Amount of debt to liquidate
+     * @return Amount of collateral that would be seized in an actual liquidation
+     */
+    function simulateLiquidation(
+        address borrower,
+        address debtToken,
+        address collateralToken,
+        uint256 debtAmount
+    ) external view returns (uint256);
 }

@@ -16,8 +16,9 @@ import {ModifyLiquidityParams, SwapParams} from "@uniswap/v4-core/src/types/Pool
 
 /**
  * @title FlashLiquidationHook
- * @notice A Uniswap V4 hook that enables flash swap functionality for liquidations
- * @dev This hook implements the afterSwap function to perform flash liquidations
+ * @notice An improved Uniswap V4 hook that enables flash swap functionality for liquidations
+ * @dev This hook implements the afterSwap function to perform flash liquidations with enhanced
+ *      error handling, slippage protection, and gas optimization
  */
 contract FlashLiquidationHook is BaseHook {
     using PoolIdLibrary for PoolKey;
@@ -27,6 +28,16 @@ contract FlashLiquidationHook is BaseHook {
     
     // Mapping to track if we're in a liquidation process (prevents reentrancy)
     mapping(PoolId => bool) public isLiquidating;
+    
+    // Constants for swap price limits
+    uint160 internal constant MIN_SQRT_RATIO = 4295128739;
+    uint160 internal constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
+    
+    // Fee tier for swaps (default to 0.3%)
+    uint24 public defaultFeeTier = 3000;
+    
+    // Default tick spacing for 0.3% pools
+    int24 public defaultTickSpacing = 60;
     
     // Event emitted when a liquidation is performed
     event LiquidationExecuted(
@@ -55,7 +66,21 @@ contract FlashLiquidationHook is BaseHook {
         address debtToken;      // Token borrowed (debt token)
         address collateralToken; // Token used as collateral
         uint256 debtAmount;     // Amount of debt to liquidate
-        uint256 minProfitAmount; // Minimum profit required (optional)
+        uint256 minProfitAmount; // Minimum profit required
+        uint256 minCollateralAmount; // Minimum collateral to receive (slippage protection)
+        uint24 feeTier;         // Fee tier to use for the swap
+    }
+    
+    /**
+     * @notice Struct to hold liquidation state
+     * @dev Used to reduce stack usage and improve gas efficiency
+     */
+    struct LiquidationState {
+        bool success;
+        string errorReason;
+        uint256 collateralAmount;
+        uint256 debtTokenReceived;
+        uint256 profit;
     }
     
     /**
@@ -68,6 +93,16 @@ contract FlashLiquidationHook is BaseHook {
         ILiquidationProtocol _liquidationProtocol
     ) BaseHook(_poolManager) {
         liquidationProtocol = _liquidationProtocol;
+    }
+    
+    /**
+     * @notice Set the default fee tier and corresponding tick spacing
+     * @param _feeTier The new default fee tier
+     * @param _tickSpacing The corresponding tick spacing
+     */
+    function setDefaultPoolConfig(uint24 _feeTier, int24 _tickSpacing) external {
+        defaultFeeTier = _feeTier;
+        defaultTickSpacing = _tickSpacing;
     }
     
     /**
@@ -96,11 +131,19 @@ contract FlashLiquidationHook is BaseHook {
     /**
      * @notice Helper to decode hook data into liquidation parameters
      * @param data Encoded liquidation parameters
-     * @return LiquidationParams struct with decoded data
+     * @return params LiquidationParams struct with decoded data
      */
-    function decodeLiquidationParams(bytes calldata data) internal pure returns (LiquidationParams memory) {
+    function decodeLiquidationParams(bytes calldata data) internal pure returns (LiquidationParams memory params) {
         if (data.length == 0) {
-            return LiquidationParams(address(0), address(0), address(0), 0, 0);
+            return LiquidationParams(
+                address(0), 
+                address(0), 
+                address(0), 
+                0, 
+                0, 
+                0, 
+                0
+            );
         }
         
         return abi.decode(data, (LiquidationParams));
@@ -136,18 +179,7 @@ contract FlashLiquidationHook is BaseHook {
         isLiquidating[poolId] = true;
         
         // Determine which token we're receiving (debt token) and how much
-        address debtToken;
-        uint256 debtAmount;
-        
-        if (params.zeroForOne) {
-            // We're swapping token0 for token1, so token1 is what we receive
-            debtToken = Currency.unwrap(key.currency1);
-            debtAmount = uint256(int256(-delta.amount1()));
-        } else {
-            // We're swapping token1 for token0, so token0 is what we receive
-            debtToken = Currency.unwrap(key.currency0);
-            debtAmount = uint256(int256(-delta.amount0()));
-        }
+        (address debtToken, uint256 debtAmount) = getFlashLoanDetails(key, params, delta);
         
         // Ensure debt token matches the expected one
         if (debtToken != liquidationParams.debtToken) {
@@ -162,92 +194,52 @@ contract FlashLiquidationHook is BaseHook {
             return (IHooks.afterSwap.selector, 0);
         }
         
-        // Using block-scoped variables to handle liquidation logic
-        bool success = false;
-        string memory errorReason = "Unknown error";
-        uint256 collateralAmount = 0;
-        uint256 debtTokenReceived = 0;
-        uint256 profit = 0;
+        // Initialize liquidation state
+        LiquidationState memory state = LiquidationState({
+            success: false,
+            errorReason: "Unknown error",
+            collateralAmount: 0,
+            debtTokenReceived: 0,
+            profit: 0
+        });
         
-        // Execute liquidation logic
-        try liquidationProtocol.liquidate(
-            liquidationParams.borrower,
-            liquidationParams.debtToken,
-            liquidationParams.collateralToken,
+        // Execute the liquidation
+        try this.executeLiquidationFlow(
+            sender,
+            liquidationParams,
             debtAmount
-        ) returns (uint256 _collateralAmount) {
-            collateralAmount = _collateralAmount;
-            
-            // Approve collateral for use by PoolManager
-            IERC20(liquidationParams.collateralToken).approve(address(poolManager), collateralAmount);
-            
-            // Now swap the collateral for debt token through a new swap
-            try this.executeCollateralSwap(
-                liquidationParams.collateralToken,
-                liquidationParams.debtToken,
-                collateralAmount
-            ) returns (uint256 _debtTokenReceived) {
-                debtTokenReceived = _debtTokenReceived;
-                
-                // Ensure we got enough debt tokens back
-                if (debtTokenReceived < debtAmount) {
-                    errorReason = "Not enough tokens to repay debt";
-                    revert(errorReason);
-                }
-                
-                // Return the debt token to the original pool through a sync and settle operation
-                try this.settleDebtToken(liquidationParams.debtToken) {
-                    // Calculate profit
-                    if (debtTokenReceived > debtAmount) {
-                        profit = debtTokenReceived - debtAmount;
-                        
-                        // Check if profit meets minimum requirement
-                        if (profit >= liquidationParams.minProfitAmount) {
-                            // Transfer profit to the caller
-                            IERC20(liquidationParams.debtToken).transfer(sender, profit);
-                        }
-                    }
-                    
-                    success = true;
-                } catch Error(string memory reason) {
-                    errorReason = reason;
-                    success = false;
-                } catch {
-                    errorReason = "Failed to settle debt";
-                    success = false;
-                    revert(errorReason);
-                }
-            } catch Error(string memory reason) {
-                errorReason = reason;
-                success = false;
-                revert(errorReason);
-            } catch {
-                errorReason = "Failed to swap collateral";
-                success = false;
-                revert(errorReason);
-            }
+        ) returns (
+            bool _success,
+            string memory _errorReason,
+            uint256 _collateralAmount,
+            uint256 _debtTokenReceived,
+            uint256 _profit
+        ) {
+            state.success = _success;
+            state.errorReason = _errorReason;
+            state.collateralAmount = _collateralAmount;
+            state.debtTokenReceived = _debtTokenReceived;
+            state.profit = _profit;
         } catch Error(string memory reason) {
-            errorReason = reason;
-            success = false;
-            revert(errorReason);
+            state.success = false;
+            state.errorReason = reason;
         } catch {
-            errorReason = "Failed to liquidate position";
-            success = false;
-            revert(errorReason);
+            state.success = false;
+            state.errorReason = "Liquidation execution failed";
         }
         
         // Reset the liquidation flag
         isLiquidating[poolId] = false;
         
-        if (success) {
+        if (state.success) {
             // Emit liquidation success event
             emit LiquidationExecuted(
                 liquidationParams.borrower,
                 liquidationParams.debtToken,
                 liquidationParams.collateralToken,
                 debtAmount,
-                collateralAmount,
-                profit
+                state.collateralAmount,
+                state.profit
             );
         } else {
             // Emit liquidation failure event
@@ -256,84 +248,228 @@ contract FlashLiquidationHook is BaseHook {
                 liquidationParams.debtToken,
                 liquidationParams.collateralToken,
                 debtAmount,
-                errorReason
+                state.errorReason
             );
+            
+            // Revert to prevent completion of the flash loan if liquidation fails
+            revert(state.errorReason);
         }
         
         // Return the appropriate function selector and a zero delta
-        // This indicates we don't want to modify the swap delta
         return (IHooks.afterSwap.selector, 0);
     }
     
     /**
-     * @notice Executes a swap to convert collateral to debt token
-     * @param collateralToken The collateral token to swap
-     * @param debtToken The debt token to receive
-     * @param collateralAmount The amount of collateral to swap
-     * @return debtTokenReceived The amount of debt tokens received
+     * @notice Extract flash loan details from the swap
+     * @param key The pool key
+     * @param params The swap parameters
+     * @param delta The balance delta
+     * @return token The token received in the flash loan
+     * @return amount The amount received
      */
-    function executeCollateralSwap(
-        address collateralToken,
-        address debtToken,
-        uint256 collateralAmount
-    ) external returns (uint256 debtTokenReceived) {
-        // Only allow this contract to call this function
-        require(msg.sender == address(this), "Only self-call allowed");
-        
-        // Get the pool key for swapping collateral to debt token
-        PoolKey memory collateralPool = getPoolKey(collateralToken, debtToken);
-        
-        // Sync the collateral token to update balances
-        poolManager.sync(Currency.wrap(collateralToken));
-        
-        // Determine swap direction
-        bool zeroForOne = collateralToken < debtToken;
-        
-        // Execute swap
-        BalanceDelta swapDelta = poolManager.swap(
-            collateralPool,
-            SwapParams({
-                zeroForOne: zeroForOne,
-                amountSpecified: int256(collateralAmount),
-                sqrtPriceLimitX96: zeroForOne ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1
-            }),
-            ""
-        );
-        
-        // Calculate received debt tokens
-        if (zeroForOne) {
-            debtTokenReceived = uint256(int256(-swapDelta.amount1()));
+    function getFlashLoanDetails(
+        PoolKey calldata key,
+        SwapParams calldata params,
+        BalanceDelta delta
+    ) internal pure returns (address token, uint256 amount) {
+        if (params.zeroForOne) {
+            // We're swapping token0 for token1, so token1 is what we receive
+            token = Currency.unwrap(key.currency1);
+            amount = uint256(int256(-delta.amount1()));
         } else {
-            debtTokenReceived = uint256(int256(-swapDelta.amount0()));
+            // We're swapping token1 for token0, so token0 is what we receive
+            token = Currency.unwrap(key.currency0);
+            amount = uint256(int256(-delta.amount0()));
         }
         
-        return debtTokenReceived;
+        return (token, amount);
     }
     
-    // Constants for swap price limits
-    uint160 internal constant MIN_SQRT_RATIO = 4295128739;
-    uint160 internal constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
-    
     /**
-     * @notice Settle debt with the pool manager
-     * @param debtToken The debt token to settle
+     * @notice Execute the liquidation flow
+     * @param sender The original sender of the transaction
+     * @param params The liquidation parameters
+     * @param debtAmount The debt amount to liquidate
+     * @return success Whether the liquidation was successful
+     * @return errorReason The error reason if unsuccessful
+     * @return collateralAmount The amount of collateral seized
+     * @return debtTokenReceived The amount of debt tokens received from selling collateral
+     * @return profit The profit amount
      */
-    function settleDebtToken(address debtToken) external {
+    function executeLiquidationFlow(
+        address sender,
+        LiquidationParams memory params,
+        uint256 debtAmount
+    ) external returns (
+        bool success,
+        string memory errorReason,
+        uint256 collateralAmount,
+        uint256 debtTokenReceived,
+        uint256 profit
+    ) {
         // Only allow this contract to call this function
         require(msg.sender == address(this), "Only self-call allowed");
         
-        // Return the debt token to the original pool
-        poolManager.sync(Currency.wrap(debtToken));
-        poolManager.settle();
+        // Execute the liquidation
+        try liquidationProtocol.liquidate(
+            params.borrower,
+            params.debtToken,
+            params.collateralToken,
+            debtAmount
+        ) returns (uint256 _collateralAmount) {
+            collateralAmount = _collateralAmount;
+            
+            // Check if we received enough collateral
+            if (collateralAmount < params.minCollateralAmount) {
+                return (
+                    false, 
+                    "Received collateral below minimum",
+                    collateralAmount,
+                    0,
+                    0
+                );
+            }
+            
+            // Swap the collateral for debt token
+            (success, errorReason, debtTokenReceived) = swapCollateralForDebt(
+                params.collateralToken,
+                params.debtToken,
+                collateralAmount,
+                params.feeTier > 0 ? params.feeTier : defaultFeeTier
+            );
+            
+            if (!success) {
+                return (false, errorReason, collateralAmount, debtTokenReceived, 0);
+            }
+            
+            // Ensure we got enough debt tokens back
+            if (debtTokenReceived < debtAmount) {
+                return (
+                    false,
+                    "Insufficient tokens to repay debt",
+                    collateralAmount,
+                    debtTokenReceived,
+                    0
+                );
+            }
+            
+            // Calculate profit
+            profit = debtTokenReceived > debtAmount ? debtTokenReceived - debtAmount : 0;
+            
+            // Check if profit meets minimum requirement
+            if (profit < params.minProfitAmount) {
+                return (
+                    false,
+                    "Profit below minimum requirement",
+                    collateralAmount,
+                    debtTokenReceived,
+                    profit
+                );
+            }
+            
+            // Settle the debt token with the pool manager
+            try poolManager.sync(Currency.wrap(params.debtToken)) {
+                try poolManager.settle() {
+                    // Transfer profit to the original sender
+                    if (profit > 0) {
+                        IERC20(params.debtToken).transfer(sender, profit);
+                    }
+                    
+                    return (true, "", collateralAmount, debtTokenReceived, profit);
+                } catch Error(string memory reason) {
+                    return (false, string(abi.encodePacked("Failed to settle: ", reason)), collateralAmount, debtTokenReceived, 0);
+                } catch {
+                    return (false, "Failed to settle debt", collateralAmount, debtTokenReceived, 0);
+                }
+            } catch Error(string memory reason) {
+                return (false, string(abi.encodePacked("Failed to sync: ", reason)), collateralAmount, debtTokenReceived, 0);
+            } catch {
+                return (false, "Failed to sync debt token", collateralAmount, debtTokenReceived, 0);
+            }
+        } catch Error(string memory reason) {
+            return (false, string(abi.encodePacked("Liquidation failed: ", reason)), 0, 0, 0);
+        } catch {
+            return (false, "Failed to liquidate position", 0, 0, 0);
+        }
+    }
+    
+    /**
+     * @notice Swap collateral for debt token
+     * @param collateralToken The collateral token
+     * @param debtToken The debt token
+     * @param collateralAmount The amount of collateral to swap
+     * @param feeTier The fee tier to use
+     * @return success Whether the swap was successful
+     * @return errorReason The error reason if unsuccessful
+     * @return debtTokenReceived The amount of debt tokens received
+     */
+    function swapCollateralForDebt(
+        address collateralToken,
+        address debtToken,
+        uint256 collateralAmount,
+        uint24 feeTier
+    ) internal returns (
+        bool success,
+        string memory errorReason,
+        uint256 debtTokenReceived
+    ) {
+        // Approve collateral for use by PoolManager
+        try IERC20(collateralToken).approve(address(poolManager), collateralAmount) {
+            // Get the pool key for swapping collateral to debt token
+            PoolKey memory collateralPool = getPoolKey(collateralToken, debtToken, feeTier);
+            
+            // Sync the collateral token to update balances
+            try poolManager.sync(Currency.wrap(collateralToken)) {
+                // Determine swap direction
+                bool zeroForOne = collateralToken < debtToken;
+                
+                // Execute swap
+                try poolManager.swap(
+                    collateralPool,
+                    SwapParams({
+                        zeroForOne: zeroForOne,
+                        amountSpecified: int256(collateralAmount),
+                        sqrtPriceLimitX96: zeroForOne ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1
+                    }),
+                    ""
+                ) returns (BalanceDelta swapDelta) {
+                    // Calculate received debt tokens
+                    if (zeroForOne) {
+                        debtTokenReceived = uint256(int256(-swapDelta.amount1()));
+                    } else {
+                        debtTokenReceived = uint256(int256(-swapDelta.amount0()));
+                    }
+                    
+                    return (true, "", debtTokenReceived);
+                } catch Error(string memory reason) {
+                    return (false, string(abi.encodePacked("Collateral swap failed: ", reason)), 0);
+                } catch {
+                    return (false, "Collateral swap failed", 0);
+                }
+            } catch Error(string memory reason) {
+                return (false, string(abi.encodePacked("Collateral sync failed: ", reason)), 0);
+            } catch {
+                return (false, "Failed to sync collateral token", 0);
+            }
+        } catch Error(string memory reason) {
+            return (false, string(abi.encodePacked("Collateral approval failed: ", reason)), 0);
+        } catch {
+            return (false, "Failed to approve collateral token", 0);
+        }
     }
     
     /**
      * @notice Helper to get a pool key for two tokens
      * @param tokenA First token
      * @param tokenB Second token
+     * @param feeTier Fee tier to use
      * @return PoolKey for the token pair
      */
-    function getPoolKey(address tokenA, address tokenB) internal view returns (PoolKey memory) {
+    function getPoolKey(
+        address tokenA, 
+        address tokenB, 
+        uint24 feeTier
+    ) internal view returns (PoolKey memory) {
         // Sort tokens to get currency0 and currency1
         (address token0, address token1) = tokenA < tokenB 
             ? (tokenA, tokenB) 
@@ -342,8 +478,8 @@ contract FlashLiquidationHook is BaseHook {
         return PoolKey({
             currency0: Currency.wrap(token0),
             currency1: Currency.wrap(token1),
-            fee: 3000, // 0.3% fee tier
-            tickSpacing: 60,
+            fee: feeTier,
+            tickSpacing: defaultTickSpacing,
             hooks: IHooks(address(this))
         });
     }
@@ -353,15 +489,19 @@ contract FlashLiquidationHook is BaseHook {
      * @param debtToken Token to borrow for liquidation
      * @param collateralToken Token used as collateral
      * @param borrower Address of the borrower to liquidate
-     * @param debtAmount Amount of debt to liquidate
-     * @param minProfitAmount Minimum profit required (optional)
+     * @param debtAmount Amount of debt to liquidate (0 for max available)
+     * @param minProfitAmount Minimum profit required
+     * @param minCollateralAmount Minimum collateral to receive (slippage protection)
+     * @param feeTier Fee tier to use (0 for default)
      */
     function flashLiquidate(
         address debtToken,
         address collateralToken,
         address borrower,
         uint256 debtAmount,
-        uint256 minProfitAmount
+        uint256 minProfitAmount,
+        uint256 minCollateralAmount,
+        uint24 feeTier
     ) external {
         // Check if the position is liquidatable first
         (bool liquidatable, uint256 maxDebtAmount) = liquidationProtocol.isLiquidatable(
@@ -372,13 +512,16 @@ contract FlashLiquidationHook is BaseHook {
         
         require(liquidatable, "Position not liquidatable");
         
-        // Cap debt amount to maximum liquidatable amount
-        if (debtAmount > maxDebtAmount) {
+        // If debtAmount is 0, use the maximum liquidatable amount
+        if (debtAmount == 0 || debtAmount > maxDebtAmount) {
             debtAmount = maxDebtAmount;
         }
         
+        // Use default fee tier if none specified
+        uint24 actualFeeTier = feeTier > 0 ? feeTier : defaultFeeTier;
+        
         // Create the pool key
-        PoolKey memory key = getPoolKey(debtToken, collateralToken);
+        PoolKey memory key = getPoolKey(debtToken, collateralToken, actualFeeTier);
         
         // Encode the liquidation parameters
         bytes memory hookData = abi.encode(
@@ -387,7 +530,9 @@ contract FlashLiquidationHook is BaseHook {
                 debtToken: debtToken,
                 collateralToken: collateralToken,
                 debtAmount: debtAmount,
-                minProfitAmount: minProfitAmount
+                minProfitAmount: minProfitAmount,
+                minCollateralAmount: minCollateralAmount,
+                feeTier: actualFeeTier
             })
         );
         
@@ -415,6 +560,7 @@ contract FlashLiquidationHook is BaseHook {
      * @return liquidatable Whether the position can be liquidated
      * @return maxDebtAmount Maximum amount of debt that can be liquidated
      * @return estimatedProfit Estimated profit from liquidation
+     * @return estimatedCollateral Estimated collateral to receive
      */
     function checkLiquidationProfitability(
         address debtToken,
@@ -423,7 +569,8 @@ contract FlashLiquidationHook is BaseHook {
     ) external view returns (
         bool liquidatable,
         uint256 maxDebtAmount,
-        uint256 estimatedProfit
+        uint256 estimatedProfit,
+        uint256 estimatedCollateral
     ) {
         // Check if position is liquidatable
         (liquidatable, maxDebtAmount) = liquidationProtocol.isLiquidatable(
@@ -433,14 +580,89 @@ contract FlashLiquidationHook is BaseHook {
         );
         
         if (!liquidatable || maxDebtAmount == 0) {
-            return (false, 0, 0);
+            return (false, 0, 0, 0);
         }
         
-        // This would require a simulation of the swap to be accurate
-        // For an MVP, we'll just return 0 for estimated profit
-        // In a production environment, you'd simulate the swap and liquidation
-        estimatedProfit = 0;
+        // Try to estimate the collateral to be received and the profit
+        // This requires the liquidation protocol to have a simulation function
+        try this.simulateLiquidation(
+            borrower,
+            debtToken,
+            collateralToken,
+            maxDebtAmount
+        ) returns (uint256 _collateral, uint256 _profit) {
+            estimatedCollateral = _collateral;
+            estimatedProfit = _profit;
+        } catch {
+            // If simulation fails, we can't provide an estimate
+            estimatedCollateral = 0;
+            estimatedProfit = 0;
+        }
         
-        return (liquidatable, maxDebtAmount, estimatedProfit);
+        return (liquidatable, maxDebtAmount, estimatedProfit, estimatedCollateral);
+    }
+    
+    /**
+     * @notice Simulate a liquidation to estimate collateral received and potential profit
+     * @param borrower Address of the borrower to liquidate
+     * @param debtToken Token to borrow for liquidation
+     * @param collateralToken Token used as collateral
+     * @param debtAmount Amount of debt to liquidate
+     * @return estimatedCollateral Estimated amount of collateral to receive
+     * @return estimatedProfit Estimated profit from the liquidation
+     */
+    function simulateLiquidation(
+        address borrower,
+        address debtToken,
+        address collateralToken,
+        uint256 debtAmount
+    ) public view returns (uint256 estimatedCollateral, uint256 estimatedProfit) {
+        // Try to estimate collateral to be received from the liquidation protocol
+        try liquidationProtocol.simulateLiquidation(
+            borrower,
+            debtToken,
+            collateralToken,
+            debtAmount
+        ) returns (uint256 collateralAmount) {
+            estimatedCollateral = collateralAmount;
+            
+            // If we got an estimate for collateral, try to estimate the swap outcome
+            if (collateralAmount > 0) {
+                // Get the pool key for the swap
+                PoolKey memory key = getPoolKey(collateralToken, debtToken, defaultFeeTier);
+                
+                // Try to get a quote for swapping the collateral back to debt token
+                try poolManager.getQuote(
+                    key,
+                    SwapParams({
+                        zeroForOne: collateralToken < debtToken,
+                        amountSpecified: int256(collateralAmount),
+                        sqrtPriceLimitX96: collateralToken < debtToken ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1
+                    })
+                ) returns (BalanceDelta quoteDelta) {
+                    // Calculate estimated debt tokens to receive
+                    uint256 estimatedDebtTokens;
+                    if (collateralToken < debtToken) {
+                        estimatedDebtTokens = uint256(int256(-quoteDelta.amount1()));
+                    } else {
+                        estimatedDebtTokens = uint256(int256(-quoteDelta.amount0()));
+                    }
+                    
+                    // Calculate estimated profit
+                    if (estimatedDebtTokens > debtAmount) {
+                        estimatedProfit = estimatedDebtTokens - debtAmount;
+                    }
+                } catch {
+                    // If quote fails, we can't estimate profit
+                    estimatedProfit = 0;
+                }
+            }
+        } catch {
+            // If simulation fails, return zero estimates
+            estimatedCollateral = 0;
+            estimatedProfit = 0;
+        }
+        
+        return (estimatedCollateral, estimatedProfit);
     }
 }
