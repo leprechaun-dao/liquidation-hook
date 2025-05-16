@@ -8,6 +8,76 @@ Traditional liquidations in DeFi lending protocols require liquidators to have t
 
 This Flash Liquidation Hook leverages Uniswap V4's hook system and flash accounting to enable capital-efficient liquidations similar to Uniswap V2's flash swaps but with improved architecture.
 
+### Architecture Overview
+
+```
+┌───────────────────────────── UNISWAP V4 FLASH LIQUIDATION ─────────────────────────────┐
+│                                                                                        │
+│  ┌────────────────────────┐              ┌───────────────────────────────┐             │
+│  │   Uniswap v4 Pool      │              │     Pool Events & Hooks       │             │
+│  │                        │              │                               │             │
+│  │  DEBT/COLLATERAL       │◄───Monitor───┤ • beforeSwap                  │             │
+│  │  Liquidity Pool        │              │ • afterSwap  [KEY HOOK]       │             │
+│  │  Swap Execution        │──Callbacks──►│ • afterAddLiquidity           │             │
+│  └──────────┬─────────────┘              └───────────────┬───────────────┘             │
+│             │                                            │                             │
+│             │                                            │                             │
+│             ▼                                            │                             │
+│  ┌────────────────────────┐                              │                             │
+│  │     Pool Manager       │                              │                             │
+│  │                        │                              │                             │
+│  │  • Flash Accounting    │◄─────────────────────────────┘                             │
+│  │  • Singleton Contract  │                                                            │
+│  │  • State Management    │                                                            │
+│  └──────────┬─────────────┘                                                            │
+└─────────────┼───────────────────────────────────────────────────────────────────────────┘
+              │                              ▲
+              │                              │
+              │                              │
+              ▼                              │
+┌────────────────────────────┐   ┌────────────────────────────┐
+│  FlashLiquidationHook      │   │  LiquidationOrchestrator   │
+├────────────────────────────┤   ├────────────────────────────┤
+│ ENTRY POINTS:              │   │ BOT INTERFACE:             │
+│ • flashLiquidate()         │   │ • scanForLiquidations()    │
+│                            │   │ • batchLiquidate()         │
+│ HOOKS:                     │   │                            │
+│ • afterSwap() [MAIN LOGIC] │   │ MONITORING:                │
+│                            │   │ • calculateProfitability() │
+│ LIQUIDATION:               │   │ • getPriceData()           │
+│ • checkProfitability()     │   │                            │
+│ • executeFlashLiquidation()│◄──┤ CONVENIENCE LAYER:         │
+│                            │   │ • Error handling           │
+│ SAFETY:                    │   │ • Safety checks            │
+│ • validateParameters()     │   │ • Batching                 │
+└──────────┬─────────────────┘   └────────────────────────────┘
+           │                                    ▲
+           │                                    │
+           │       ┌────────────────────────────┘
+           │       │
+           ▼       │
+┌────────────────────────────┐
+│ ILiquidationProtocol       │
+├────────────────────────────┤
+│ INTERFACE:                 │
+│ • liquidate()              │
+│ • isLiquidatable()         │
+│ • simulateLiquidation()    │
+└──────────┬─────────────────┘
+           │
+           │
+           ▼
+┌────────────────────────────┐
+│ Leprechaun Protocol        │
+├────────────────────────────┤
+│ • PositionManager          │
+│ • SyntheticAsset           │
+│ • LeprechaunLens           │
+│ • LeprechaunFactory        │
+└────────────────────────────┘
+```
+
+
 ## How It Works
 
 ### User Flow
@@ -239,6 +309,21 @@ $ forge build --via-ir
 $ forge script script/Deploy.s.sol:DeployScript --rpc-url <your_rpc_url> --private-key <your_private_key>
 ```
 
+## Integration with Liquidation Bot
+
+This hook system is designed to work seamlessly with the Leprechaun Liquidation Bot, an off-chain solution that can monitor positions and trigger liquidations. The liquidation bot:
+
+1. **Monitors**: Scans for underwater positions using the protocol's Lens contract
+2. **Analyzes**: Evaluates whether liquidations would be profitable
+3. **Executes**: Calls the FlashLiquidationHook to perform the liquidation
+
+The bot supports:
+- Deployment as a standalone service
+- Serverless deployment with Vercel Functions
+- REST API endpoints for integration with other systems
+
+For bot implementation details, see the [Liquidation Bot Repository](https://github.com/yourusername/liquidation-bot).
+
 ## Integration with Lending Protocols
 
 To integrate with a specific lending protocol:
@@ -254,6 +339,8 @@ To integrate with a specific lending protocol:
 - **Minimum Profit**: Optional parameter to ensure liquidations are profitable enough
 - **Slippage Protection**: Could be extended to include more advanced slippage protection
 - **Gas Optimization**: The implementation is designed to be gas-efficient
+- **Access Control**: The Orchestrator can implement permissioned functions
+- **MEV Protection**: Consider front-running protection when deploying in production
 
 ## TODO
 
@@ -262,6 +349,9 @@ To integrate with a specific lending protocol:
 3. **Fee Distribution**: Share liquidation profits with protocol or affected LPs
 4. **Partial Liquidations**: Enable liquidating only a portion of a position
 5. **MEV Protection**: Add mechanisms to prevent liquidation front-running
+6. **Integration Tests**: Add comprehensive integration tests with Leprechaun Protocol
+7. **Gas Optimization**: Further optimize gas usage for production deployment
+8. **Monitoring Dashboard**: Create a web dashboard for monitoring liquidation opportunities
 
 ## License
 
@@ -271,3 +361,4 @@ This project is licensed under MIT - see the LICENSE file for details.
 
 - [Uniswap V4](https://github.com/Uniswap/v4-core) - For the hook system and flash accounting
 - [Foundry](https://github.com/foundry-rs/foundry) - For the development framework
+- [Leprechaun Protocol](https://github.com/yourusername/leprechaun-protocol) - For the synthetic asset platform
