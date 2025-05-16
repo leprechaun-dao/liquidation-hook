@@ -60,6 +60,88 @@ Interface for interacting with the lending protocol.
 
 A mock implementation of the lending protocol for testing and demonstration purposes.
 
+### LiquidationOrchestrator
+This is a convenience layer on top of the FlashLiquidationHook. It doesn't have a direct connection to the hook in the sense of ownership or permissions - it's simply a contract that calls the hook's functions. The Orchestrator provides several benefits compared to direct hook interactions:
+
+- Abstraction: It abstracts away some of the complexity of calling the hook directly
+- Batch Processing: It can handle batched liquidations across multiple positions
+- Monitoring: It helps track token pairs for liquidation opportunities
+- Safety Features: It includes profit checks and emergency functions
+- Permissions: It can implement access controls for certain functions
+
+Think of the Orchestrator as a "bot manager" that makes it easier for liquidation bots to interact with the hook, but it's not a required component.
+
+## Creating a Pool with the Hook
+
+Uniswap V4 introduces a new architecture where hooks are directly associated with pools. Here's how to create a pool with the FlashLiquidationHook:
+
+### 1. Deploy the Hook Contract
+
+First, deploy the FlashLiquidationHook contract:
+
+```solidity
+// Deploy the hook with the PoolManager and LiquidationProtocol addresses
+FlashLiquidationHook hook = new FlashLiquidationHook(
+    IPoolManager(poolManagerAddress),
+    ILiquidationProtocol(liquidationProtocolAddress)
+);
+```
+
+### 2. Create a Pool Factory
+
+To create pools with hooks, you'll need a factory contract that interacts with the Uniswap V4 PoolManager:
+
+```solidity
+// Create a pool factory that can create pools with hooks
+PoolFactory factory = new PoolFactory(IPoolManager(poolManagerAddress));
+```
+
+### 3. Initialize a Pool with the Hook
+
+Using the factory, initialize a new pool with the hook:
+
+```solidity
+// Create a pool key with the hook address
+PoolKey memory poolKey = PoolKey({
+    currency0: Currency.wrap(address(token0)),
+    currency1: Currency.wrap(address(token1)),
+    fee: 3000, // 0.3% fee tier
+    tickSpacing: 60,
+    hooks: IHooks(address(hook))
+});
+
+// Initialize the pool
+factory.createAndInitializePool(poolKey, initialSqrtPriceX96);
+```
+
+### 4. Add Liquidity to the Pool
+
+After creating the pool, you can add liquidity:
+
+```solidity
+// Add liquidity to the pool
+factory.addLiquidity(
+    poolKey,
+    IPoolManager.ModifyLiquidityParams({
+        tickLower: lowerTick,
+        tickUpper: upperTick,
+        liquidityDelta: liquidityAmount
+    })
+);
+```
+
+### 5. Automatic Hook Execution
+
+Once the pool is created with the hook, the hook's logic is automatically executed whenever a swap occurs in the pool. For our FlashLiquidationHook, the `afterSwap` function will be called after every swap in the pool.
+
+### Key Points to Remember:
+
+- **Hook Address Must Be Whitelisted**: In Uniswap V4, hook addresses must be whitelisted as part of the factory contract (for security reasons)
+- **Hooks Are Immutable**: Once a pool is created with a hook, the hook cannot be changed
+- **Multiple Pools Can Share the Same Hook**: You can create many pools that all use the same hook instance
+- **Hooks Must Be Gas-Efficient**: Since hooks are called automatically on various operations, they need to be gas-efficient to keep transaction costs reasonable
+- **Flash Accounting**: Uniswap V4's flash accounting allows the hook to handle debt that must be repaid by the end of the transaction, which is what enables our flash liquidation mechanism
+
 ## Key Benefits
 
 1. **Capital Efficiency**: Liquidators don't need to hold debt tokens beforehand
@@ -130,6 +212,18 @@ flashLiquidationHook.flashLiquidate(
     minProfitAmount   // Minimum profit required (optional)
 );
 ```
+
+## Understanding Direct Interaction vs. Orchestrator
+
+While you can interact directly with the FlashLiquidationHook, the LiquidationOrchestrator provides several advantages:
+
+1. **Convenience**: Abstracts away complexities of direct hook interaction
+2. **Batch Processing**: Can execute multiple liquidations in a single transaction
+3. **Profit Optimization**: Includes logic to check profitability before executing
+4. **Monitoring**: Tracks token pairs for liquidation opportunities
+5. **Safety Features**: Includes emergency functions and better error handling
+
+For simple use cases, direct interaction with the hook is sufficient. For production use or automated bots, the Orchestrator provides a more robust interface.
 
 ## Development
 
