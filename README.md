@@ -11,26 +11,26 @@ This Flash Liquidation Hook leverages Uniswap V4's hook system and flash account
 ### Architecture Overview
 
 ```
-┌───────────────────────────── UNISWAP V4 FLASH LIQUIDATION ─────────────────────────────┐
-│                                                                                        │
-│  ┌────────────────────────┐              ┌───────────────────────────────┐             │
-│  │   Uniswap v4 Pool      │              │     Pool Events & Hooks       │             │
-│  │                        │              │                               │             │
-│  │  DEBT/COLLATERAL       │◄───Monitor───┤ • beforeSwap                  │             │
-│  │  Liquidity Pool        │              │ • afterSwap  [KEY HOOK]       │             │
-│  │  Swap Execution        │──Callbacks──►│ • afterAddLiquidity           │             │
-│  └──────────┬─────────────┘              └───────────────┬───────────────┘             │
-│             │                                            │                             │
-│             │                                            │                             │
-│             ▼                                            │                             │
-│  ┌────────────────────────┐                              │                             │
-│  │     Pool Manager       │                              │                             │
-│  │                        │                              │                             │
-│  │  • Flash Accounting    │◄─────────────────────────────┘                             │
-│  │  • Singleton Contract  │                                                            │
-│  │  • State Management    │                                                            │
-│  └──────────┬─────────────┘                                                            │
-└─────────────┼───────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────── UNISWAP V4 FLASH LIQUIDATION ────────────────────┐
+│                                                                               │
+│  ┌────────────────────────┐              ┌───────────────────────────────┐    │
+│  │   Uniswap v4 Pool      │              │     Pool Events & Hooks       │    │
+│  │                        │              │                               │    │
+│  │  DEBT/COLLATERAL       │◄───Monitor───┤ • beforeSwap                  │    │
+│  │  Liquidity Pool        │              │ • afterSwap  [KEY HOOK]       │    │
+│  │  Swap Execution        │──Callbacks──►│ • afterAddLiquidity           │    │
+│  └──────────┬─────────────┘              └───────────────┬───────────────┘    │
+│             │                                            │                    │
+│             │                                            │                    │
+│             ▼                                            │                    │
+│  ┌────────────────────────┐                              │                    │
+│  │     Pool Manager       │                              │                    │
+│  │                        │                              │                    │
+│  │  • Flash Accounting    │◄─────────────────────────────┘                    │
+│  │  • Singleton Contract  │                                                   │
+│  │  • State Management    │                                                   │
+│  └──────────┬─────────────┘                                                   │
+└─────────────┼─────────────────────────────────────────────────────────────────┘
               │                              ▲
               │                              │
               │                              │
