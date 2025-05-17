@@ -206,10 +206,9 @@ Once the pool is created with the hook, the hook's logic is automatically execut
 
 ### Key Points to Remember:
 
-- **Hook Address Must Be Whitelisted**: In Uniswap V4, hook addresses must be whitelisted as part of the factory contract (for security reasons)
 - **Hooks Are Immutable**: Once a pool is created with a hook, the hook cannot be changed
 - **Multiple Pools Can Share the Same Hook**: You can create many pools that all use the same hook instance
-- **Hooks Must Be Gas-Efficient**: Since hooks are called automatically on various operations, they need to be gas-efficient to keep transaction costs reasonable
+- **Hooks Must Be Gas-Efficient**: Since hooks are called automatically on various operations, they need to be gas-efficient to keep transaction costs reasonable (Base mitigates that)
 - **Flash Accounting**: Uniswap V4's flash accounting allows the hook to handle debt that must be repaid by the end of the transaction, which is what enables our flash liquidation mechanism
 
 ## Key Benefits
